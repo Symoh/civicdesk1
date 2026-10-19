@@ -1,0 +1,190 @@
+
+<?php
+declare(strict_types=1);
+
+$pageTitle = 'CivicDesk | Public Service Request System';
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description"
+          content="CivicDesk helps citizens submit public service requests and track their progress.">
+    <title><?= htmlspecialchars($pageTitle, ENT_QUOTES, 'UTF-8') ?></title>
+    <link rel="stylesheet" href="assets/style.css">
+    <script src="assets/script.js" defer></script>
+</head>
+<body>
+
+<header class="site-header">
+    <div class="container navbar">
+        <a class="brand" href="index.php" aria-label="CivicDesk home">
+            <span class="brand-mark" aria-hidden="true">C</span>
+            <span>CivicDesk</span>
+        </a>
+
+        <button
+            class="nav-toggle"
+            id="navToggle"
+            type="button"
+            aria-controls="navLinks"
+            aria-expanded="false">
+            Menu
+        </button>
+
+        <nav class="nav-links" id="navLinks" aria-label="Main navigation">
+            <a href="#services">Services</a>
+            <a href="#how-it-works">How it works</a>
+            <a href="login.php">Sign in</a>
+            <a class="btn" href="register.php">Get started</a>
+        </nav>
+    </div>
+</header>
+
+<main>
+    <section class="hero">
+        <div class="container hero-grid">
+            <div>
+                <span class="eyebrow">PUBLIC SERVICE REQUESTS, SIMPLIFIED</span>
+
+                <h1>
+                    Your voice matters.
+                    <span>Your community matters.</span>
+                </h1>
+
+                <p>
+                    CivicDesk is a simple digital platform where citizens
+                    can submit public service concerns, follow their progress,
+                    and see when action has been taken.
+                </p>
+
+                <div class="hero-actions">
+                    <a class="btn" href="register.php">
+                        Submit a request &rarr;
+                    </a>
+                    <a class="btn btn-secondary" href="login.php">
+                        Track my requests
+                    </a>
+                </div>
+            </div>
+
+            <aside class="hero-panel">
+                <h2>Designed around your needs</h2>
+
+                <div class="feature-row">
+                    <div class="feature-icon" aria-hidden="true">01</div>
+                    <div>
+                        <h3>Easy submission</h3>
+                        <p>Describe a concern and provide its location.</p>
+                    </div>
+                </div>
+
+                <div class="feature-row">
+                    <div class="feature-icon" aria-hidden="true">02</div>
+                    <div>
+                        <h3>Clear progress</h3>
+                        <p>See whether your request is pending, in progress,
+                           or resolved.</p>
+                    </div>
+                </div>
+
+                <div class="feature-row">
+                    <div class="feature-icon" aria-hidden="true">03</div>
+                    <div>
+                        <h3>Accountability</h3>
+                        <p>Keep a record of requests and their status updates.</p>
+                    </div>
+                </div>
+            </aside>
+        </div>
+    </section>
+
+    <section class="section" id="services">
+        <div class="container">
+            <div class="section-heading">
+                <h2>What can you report?</h2>
+                <p>
+                    CivicDesk can organise public service concerns into
+                    clear categories so they can be reviewed efficiently.
+                </p>
+            </div>
+
+            <div class="card-grid">
+                <article class="service-card">
+                    <div class="feature-icon" aria-hidden="true">+</div>
+                    <h3>Roads and infrastructure</h3>
+                    <p>Report potholes, damaged roads, and infrastructure
+                       concerns in your area.</p>
+                </article>
+
+                <article class="service-card">
+                    <div class="feature-icon" aria-hidden="true">W</div>
+                    <h3>Water and sanitation</h3>
+                    <p>Report water supply problems, drainage issues,
+                       and sanitation concerns.</p>
+                </article>
+
+                <article class="service-card">
+                    <div class="feature-icon" aria-hidden="true">!</div>
+                    <h3>Waste and environment</h3>
+                    <p>Raise concerns about waste collection, illegal
+                       dumping, or environmental cleanliness.</p>
+                </article>
+            </div>
+        </div>
+    </section>
+
+    <section class="section" id="how-it-works">
+        <div class="container">
+            <div class="section-heading">
+                <h2>How CivicDesk works</h2>
+                <p>Three simple steps take your concern from submission
+                   to a recorded outcome.</p>
+            </div>
+
+            <div class="steps">
+                <article class="step-card">
+                    <div class="step-number">1</div>
+                    <h3>Create an account</h3>
+                    <p>Register with your name and email so your requests
+                       can be associated with your account.</p>
+                </article>
+
+                <article class="step-card">
+                    <div class="step-number">2</div>
+                    <h3>Submit your request</h3>
+                    <p>Choose a category, describe the issue, and provide
+                       its location. An image may be attached.</p>
+                </article>
+
+                <article class="step-card">
+                    <div class="step-number">3</div>
+                    <h3>Follow progress</h3>
+                    <p>Sign in to review your requests and see status
+                       updates as they are recorded.</p>
+                </article>
+            </div>
+        </div>
+    </section>
+
+    <section class="container">
+        <div class="cta">
+            <div>
+                <h2>Have a concern to report?</h2>
+                <p>Create an account to get started with CivicDesk.</p>
+            </div>
+            <a class="btn" href="register.php">Create an account</a>
+        </div>
+    </section>
+</main>
+
+<footer class="site-footer">
+    <div class="container footer-inner">
+        <span>&copy; <span id="currentYear">2026</span> CivicDesk</span>
+        <span>A public service request system demonstration project.</span>
+    </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,20 @@
+
+document.addEventListener("DOMContentLoaded", () => {
+    const menuButton = document.querySelector("#navToggle");
+    const navigation = document.querySelector("#navLinks");
+
+    if (menuButton && navigation) {
+        menuButton.addEventListener("click", () => {
+            const isOpen = navigation.classList.toggle("is-open");
+
+            menuButton.setAttribute("aria-expanded", String(isOpen));
+            menuButton.textContent = isOpen ? "Close menu" : "Menu";
+        });
+    }
+
+    const yearElement = document.querySelector("#currentYear");
+
+    if (yearElement) {
+        yearElement.textContent = new Date().getFullYear();
+    }
+});

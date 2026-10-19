@@ -1,0 +1,1832 @@
+<?php
+declare(strict_types=1);
+$isHttps = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path' => '/',
+    'secure' => $isHttps,
+    'httponly' => true,
+    'samesite' => 'Lax',
+]);
+
+session_start();
+
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+
+require_once __DIR__ . '/config.php';
+
+// Only authenticated users may access the dashboard.
+if (!isset($_SESSION['user_id'], $_SESSION['role'])) {
+    header('Location: login.php');
+    exit;
+}
+
+if ($_SESSION['role'] === 'admin') {
+    header('Location: admin.php');
+    exit;
+}
+
+if ($_SESSION['role'] !== 'citizen') {
+    http_response_code(403);
+    exit('Access denied. Your account does not have permission to view this page.');
+}
+
+function escape(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+function formatDate(?string $value): string
+{
+    if (!$value) {
+        return 'Not available';
+    }
+
+    $timestamp = strtotime($value);
+
+    return $timestamp !== false
+        ? date('d M Y, h:i A', $timestamp)
+        : 'Not available';
+}
+
+function statusClass(string $status): string
+{
+    return match (strtolower(trim($status))) {
+        'pending' => 'pending',
+        'in progress' => 'in-progress',
+        'resolved' => 'resolved',
+        default => 'other',
+    };
+}
+
+$userId = (int) $_SESSION['user_id'];
+$fullName = (string) ($_SESSION['full_name'] ?? 'Citizen');
+
+try {
+    // Preserve the existing citizen-specific statistics query.
+      // Count requests while handling inconsistent status capitalization/spaces.
+    $countStmt = $pdo->prepare(
+        "SELECT
+            COUNT(*) AS total,
+            COALESCE(SUM(LOWER(TRIM(status)) = 'pending'), 0) AS pending,
+            COALESCE(SUM(LOWER(TRIM(status)) = 'in progress'), 0) AS in_progress,
+            COALESCE(SUM(LOWER(TRIM(status)) = 'resolved'), 0) AS resolved
+         FROM service_requests
+         WHERE citizen_id = :citizen_id"
+    );
+    $countStmt->execute(['citizen_id' => $userId]);
+
+    $stats = $countStmt->fetch(PDO::FETCH_ASSOC) ?: [
+        'total' => 0,
+        'pending' => 0,
+        'in_progress' => 0,
+        'resolved' => 0,
+    ];
+
+    // Retrieve only the signed-in citizen's requests.
+    // No new database columns or tables are required.
+    $requestStmt = $pdo->prepare(
+        "SELECT reference_number, category, location, status,
+                created_at, updated_at
+         FROM service_requests
+         WHERE citizen_id = :citizen_id
+         ORDER BY created_at DESC
+         LIMIT 20"
+    );
+
+    $requestStmt->execute(['citizen_id' => $userId]);
+    $requests = $requestStmt->fetchAll(PDO::FETCH_ASSOC);
+
+} catch (PDOException $e) {
+    error_log('CivicDesk dashboard query failed: ' . $e->getMessage());
+    http_response_code(500);
+    exit(
+        'Unable to load your dashboard at the moment. Please try again later.'
+    );
+}
+
+$totalRequests = (int) $stats['total'];
+$pendingRequests = (int) $stats['pending'];
+$progressRequests = (int) $stats['in_progress'];
+$resolvedRequests = (int) $stats['resolved'];
+
+$initials = '';
+$nameParts = preg_split('/\s+/', trim($fullName)) ?: [];
+
+foreach (array_slice($nameParts, 0, 2) as $part) {
+    if ($part !== '') {
+        $initials .= strtoupper(substr($part, 0, 1));
+    }
+}
+
+if ($initials === '') {
+    $initials = 'C';
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Citizen Dashboard | CivicDesk</title>
+
+    <link rel="stylesheet" href="assets/style.css">
+
+    <style>
+        :root {
+            --cd-navy: #102746;
+            --cd-navy-light: #193b65;
+            --cd-blue: #2563eb;
+            --cd-blue-light: #eff6ff;
+            --cd-bg: #f4f7fb;
+            --cd-white: #ffffff;
+            --cd-text: #172b45;
+            --cd-muted: #718096;
+            --cd-border: #e3eaf2;
+            --cd-green: #15803d;
+            --cd-green-bg: #dcfce7;
+            --cd-orange: #b45309;
+            --cd-orange-bg: #fef3c7;
+            --cd-red: #b91c1c;
+            --cd-red-bg: #fee2e2;
+            --cd-sidebar-width: 258px;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html {
+            scroll-behavior: smooth;
+            scroll-padding-top: 24px;
+        }
+
+        body {
+            margin: 0;
+            background: var(--cd-bg);
+            color: var(--cd-text);
+            font-family: Inter, -apple-system, BlinkMacSystemFont,
+                "Segoe UI", sans-serif;
+            font-size: 14px;
+            line-height: 1.6;
+        }
+
+        body.menu-open {
+            overflow: hidden;
+        }
+
+        a {
+            color: inherit;
+            text-decoration: none;
+        }
+
+        button,
+        input,
+        select {
+            font: inherit;
+        }
+
+        button,
+        a,
+        input,
+        select {
+            -webkit-tap-highlight-color: transparent;
+        }
+
+        button:focus-visible,
+        a:focus-visible,
+        input:focus-visible,
+        select:focus-visible {
+            outline: 3px solid #93c5fd;
+            outline-offset: 3px;
+        }
+
+        .cd-layout {
+            min-height: 100vh;
+        }
+
+        /* Sidebar */
+
+        .cd-sidebar {
+            position: fixed;
+            z-index: 100;
+            inset: 0 auto 0 0;
+            display: flex;
+            flex-direction: column;
+            width: var(--cd-sidebar-width);
+            padding: 26px 18px 20px;
+            overflow-y: auto;
+            background: var(--cd-navy);
+            color: #fff;
+            transition: transform .25s ease;
+        }
+
+        .cd-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 0 10px 30px;
+            color: #fff;
+            font-size: 22px;
+            font-weight: 800;
+            letter-spacing: -.5px;
+        }
+
+        .cd-brand-mark {
+            display: grid;
+            width: 42px;
+            height: 42px;
+            place-items: center;
+            border-radius: 12px;
+            background: #fff;
+            color: var(--cd-navy);
+            font-size: 23px;
+            font-weight: 900;
+        }
+
+        .cd-brand small {
+            display: block;
+            margin-top: -3px;
+            color: #b9cce4;
+            font-size: 10px;
+            font-weight: 500;
+            letter-spacing: 1.5px;
+        }
+
+        .cd-nav-heading {
+            margin: 10px 12px 12px;
+            color: #92a9c6;
+            font-size: 10px;
+            font-weight: 700;
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+        }
+
+        .cd-nav {
+            display: grid;
+            gap: 7px;
+        }
+
+        .cd-nav-link {
+            display: flex;
+            align-items: center;
+            gap: 13px;
+            min-height: 46px;
+            padding: 11px 13px;
+            border: 1px solid transparent;
+            border-radius: 9px;
+            color: #cbd7e7;
+            font-size: 13px;
+            font-weight: 600;
+            transition: background .2s, color .2s;
+        }
+
+        .cd-nav-link:hover {
+            background: rgba(255,255,255,.08);
+            color: #fff;
+        }
+
+        .cd-nav-link.active {
+            border-color: rgba(255,255,255,.08);
+            background: #244c7b;
+            color: #fff;
+        }
+
+        .cd-nav-icon {
+            display: inline-grid;
+            width: 23px;
+            place-items: center;
+            font-size: 17px;
+        }
+
+        .cd-sidebar-bottom {
+            margin-top: auto;
+            padding-top: 25px;
+        }
+
+        .cd-help-card {
+            margin: 0 2px 22px;
+            padding: 17px;
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 12px;
+            background: rgba(255,255,255,.055);
+        }
+
+        .cd-help-card strong {
+            display: block;
+            margin-bottom: 5px;
+            color: #fff;
+        }
+
+        .cd-help-card p {
+            margin: 0;
+            color: #b9cce4;
+            font-size: 12px;
+        }
+
+        .cd-sidebar-footer {
+            padding: 15px 10px 0;
+            border-top: 1px solid rgba(255,255,255,.12);
+            color: #9eb1ca;
+            font-size: 11px;
+        }
+
+        .cd-sidebar-footer a {
+            display: inline-block;
+            margin-top: 9px;
+            color: #fff;
+        }
+
+        /* Main content */
+
+        .cd-main {
+            min-height: 100vh;
+            margin-left: var(--cd-sidebar-width);
+        }
+
+        .cd-topbar {
+            position: sticky;
+            z-index: 40;
+            top: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 18px;
+            min-height: 78px;
+            padding: 15px 34px;
+            border-bottom: 1px solid var(--cd-border);
+            background: rgba(255,255,255,.96);
+            backdrop-filter: blur(12px);
+        }
+
+        .cd-topbar-left,
+        .cd-profile {
+            display: flex;
+            align-items: center;
+            gap: 13px;
+            min-width: 0;
+        }
+
+        .cd-topbar-label {
+            margin: 0;
+            color: var(--cd-muted);
+            font-size: 12px;
+        }
+
+        .cd-topbar-title {
+            margin: 0;
+            color: var(--cd-navy);
+            font-size: 17px;
+            font-weight: 750;
+        }
+
+        .cd-profile {
+            justify-content: flex-end;
+        }
+
+        .cd-avatar {
+            display: grid;
+            flex: 0 0 42px;
+            width: 42px;
+            height: 42px;
+            place-items: center;
+            border: 1px solid #d9e7fb;
+            border-radius: 50%;
+            background: var(--cd-blue-light);
+            color: var(--cd-blue);
+            font-size: 14px;
+            font-weight: 800;
+        }
+
+        .cd-profile-name {
+            display: block;
+            max-width: 190px;
+            overflow: hidden;
+            color: var(--cd-text);
+            font-size: 13px;
+            font-weight: 700;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .cd-profile-role {
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        .cd-menu-button {
+            display: none;
+            width: 42px;
+            height: 42px;
+            border: 1px solid var(--cd-border);
+            border-radius: 9px;
+            background: #fff;
+            color: var(--cd-navy);
+            cursor: pointer;
+            font-size: 22px;
+        }
+
+        .cd-overlay {
+            display: none;
+        }
+
+        .cd-content {
+            width: 100%;
+            max-width: 1500px;
+            margin: 0 auto;
+            padding: 32px 34px 26px;
+        }
+
+        .cd-page-heading {
+            display: flex;
+            align-items: flex-end;
+            justify-content: space-between;
+            gap: 20px;
+            margin-bottom: 25px;
+        }
+
+        .cd-eyebrow {
+            margin: 0 0 5px;
+            color: var(--cd-blue);
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: 1.4px;
+            text-transform: uppercase;
+        }
+
+        .cd-page-heading h1 {
+            margin: 0;
+            color: var(--cd-navy);
+            font-size: clamp(25px, 3vw, 32px);
+            font-weight: 800;
+            letter-spacing: -.8px;
+            line-height: 1.25;
+        }
+
+        .cd-page-heading p:last-child {
+            margin: 9px 0 0;
+            color: var(--cd-muted);
+            font-size: 13px;
+        }
+
+        /* Buttons */
+
+        .cd-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 9px;
+            min-height: 43px;
+            padding: 10px 17px;
+            border: 1px solid transparent;
+            border-radius: 9px;
+            background: var(--cd-blue);
+            color: #fff;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 750;
+            text-align: center;
+            transition: background .2s, transform .2s;
+        }
+
+        .cd-button:hover {
+            transform: translateY(-1px);
+            background: #1d4ed8;
+        }
+
+        .cd-button-secondary {
+            border-color: var(--cd-border);
+            background: #fff;
+            color: var(--cd-navy);
+        }
+
+        .cd-button-secondary:hover {
+            background: #f7faff;
+        }
+
+        /* Welcome banner */
+
+        .cd-welcome {
+            position: relative;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 22px;
+            min-height: 185px;
+            margin-bottom: 28px;
+            padding: 30px 32px;
+            overflow: hidden;
+            border-radius: 16px;
+            background: linear-gradient(
+                115deg,
+                #102746 0%,
+                #183c67 68%,
+                #24558b 100%
+            );
+            color: #fff;
+        }
+
+        .cd-welcome::after {
+            position: absolute;
+            top: -85px;
+            right: 12%;
+            width: 240px;
+            height: 240px;
+            border: 1px solid rgba(255,255,255,.12);
+            border-radius: 50%;
+            box-shadow:
+                0 0 0 28px rgba(255,255,255,.035),
+                0 0 0 57px rgba(255,255,255,.025);
+            content: "";
+            pointer-events: none;
+        }
+
+        .cd-welcome-content {
+            position: relative;
+            z-index: 1;
+            min-width: 0;
+        }
+
+        .cd-welcome-tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            margin-bottom: 13px;
+            color: #c6dcf8;
+            font-size: 10px;
+            font-weight: 800;
+            letter-spacing: 1.5px;
+            text-transform: uppercase;
+        }
+
+        .cd-welcome h2 {
+            margin: 0;
+            font-size: clamp(23px, 3vw, 30px);
+            font-weight: 800;
+            letter-spacing: -.6px;
+            line-height: 1.3;
+            overflow-wrap: anywhere;
+        }
+
+        .cd-welcome p {
+            margin: 9px 0 0;
+            color: #d5e3f5;
+            font-size: 13px;
+        }
+
+        .cd-welcome-action {
+            position: relative;
+            z-index: 1;
+            flex-shrink: 0;
+        }
+
+        .cd-welcome .cd-button {
+            background: #fff;
+            color: var(--cd-navy);
+        }
+
+        .cd-welcome .cd-button:hover {
+            background: #edf4ff;
+        }
+
+        /* Statistics */
+
+        .cd-section-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin: 0 0 16px;
+        }
+
+        .cd-section-heading h2 {
+            margin: 0;
+            color: var(--cd-navy);
+            font-size: 17px;
+            font-weight: 800;
+        }
+
+        .cd-section-note {
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        .cd-stats {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 17px;
+            margin-bottom: 31px;
+        }
+
+        .cd-stat-card {
+            min-width: 0;
+            padding: 20px;
+            border: 1px solid var(--cd-border);
+            border-radius: 13px;
+            background: #fff;
+            box-shadow: 0 3px 12px rgba(16,39,70,.025);
+        }
+
+        .cd-stat-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin-bottom: 18px;
+        }
+
+        .cd-stat-label {
+            color: var(--cd-muted);
+            font-size: 12px;
+            font-weight: 650;
+        }
+
+        .cd-stat-icon {
+            display: grid;
+            flex: 0 0 38px;
+            width: 38px;
+            height: 38px;
+            place-items: center;
+            border-radius: 10px;
+            font-size: 19px;
+        }
+
+        .cd-icon-blue {
+            background: #eff6ff;
+            color: #2563eb;
+        }
+
+        .cd-icon-orange {
+            background: var(--cd-orange-bg);
+            color: var(--cd-orange);
+        }
+
+        .cd-icon-purple {
+            background: #f3e8ff;
+            color: #7e22ce;
+        }
+
+        .cd-icon-green {
+            background: var(--cd-green-bg);
+            color: var(--cd-green);
+        }
+
+        .cd-stat-number {
+            color: var(--cd-navy);
+            font-size: 30px;
+            font-weight: 850;
+            letter-spacing: -1px;
+            line-height: 1.2;
+        }
+
+        .cd-stat-description {
+            margin: 8px 0 0;
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        /* Request controls */
+
+        .cd-requests-panel {
+            overflow: hidden;
+            border: 1px solid var(--cd-border);
+            border-radius: 14px;
+            background: #fff;
+            box-shadow: 0 3px 12px rgba(16,39,70,.025);
+        }
+
+        .cd-requests-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+            padding: 22px 23px;
+            border-bottom: 1px solid var(--cd-border);
+        }
+
+        .cd-requests-header h2 {
+            margin: 0;
+            color: var(--cd-navy);
+            font-size: 17px;
+            font-weight: 800;
+        }
+
+        .cd-requests-header p {
+            margin: 4px 0 0;
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        .cd-controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 18px 23px;
+            border-bottom: 1px solid var(--cd-border);
+            background: #fcfdff;
+        }
+
+        .cd-search-wrap {
+            position: relative;
+            flex: 1;
+            min-width: 120px;
+        }
+
+        .cd-search-icon {
+            position: absolute;
+            top: 50%;
+            left: 13px;
+            color: #8292a8;
+            font-size: 17px;
+            transform: translateY(-50%);
+            pointer-events: none;
+        }
+
+        .cd-search,
+        .cd-filter {
+            width: 100%;
+            min-height: 43px;
+            border: 1px solid #dce5ef;
+            border-radius: 8px;
+            background: #fff;
+            color: var(--cd-text);
+            font-size: 12px;
+        }
+
+        .cd-search {
+            padding: 10px 13px 10px 39px;
+        }
+
+        .cd-search::placeholder {
+            color: #98a5b6;
+        }
+
+        .cd-filter {
+            width: 175px;
+            padding: 10px 12px;
+            cursor: pointer;
+        }
+
+        .cd-results-count {
+            padding: 0 23px 15px;
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        /* Request cards */
+
+        .cd-request-list {
+            display: grid;
+            gap: 0;
+        }
+
+        .cd-request-card {
+            min-width: 0;
+            padding: 23px;
+            border-bottom: 1px solid var(--cd-border);
+        }
+
+        .cd-request-card:last-child {
+            border-bottom: 0;
+        }
+
+        .cd-request-top {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 15px;
+        }
+
+        .cd-request-reference {
+            margin: 0;
+            color: var(--cd-blue);
+            font-size: 11px;
+            font-weight: 800;
+            letter-spacing: .4px;
+            overflow-wrap: anywhere;
+        }
+
+        .cd-request-title {
+            margin: 5px 0 0;
+            color: var(--cd-navy);
+            font-size: 16px;
+            font-weight: 800;
+            overflow-wrap: anywhere;
+        }
+
+        .cd-request-location {
+            margin: 5px 0 0;
+            color: var(--cd-muted);
+            font-size: 12px;
+            overflow-wrap: anywhere;
+        }
+
+        .cd-status {
+            display: inline-flex;
+            flex-shrink: 0;
+            align-items: center;
+            gap: 7px;
+            padding: 6px 10px;
+            border-radius: 20px;
+            font-size: 10px;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+
+        .cd-status::before {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+            content: "";
+        }
+
+        .cd-status-pending {
+            background: var(--cd-orange-bg);
+            color: var(--cd-orange);
+        }
+
+        .cd-status-in-progress {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .cd-status-resolved {
+            background: var(--cd-green-bg);
+            color: var(--cd-green);
+        }
+
+        .cd-status-other {
+            background: #edf1f6;
+            color: #475569;
+        }
+
+        .cd-request-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 9px 25px;
+            margin-top: 17px;
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        .cd-request-meta strong {
+            color: #526174;
+            font-weight: 700;
+        }
+
+        /* Progress timeline */
+
+        .cd-timeline {
+            margin-top: 24px;
+            padding: 17px 18px 14px;
+            border: 1px solid #e8eef6;
+            border-radius: 10px;
+            background: #fafcff;
+        }
+
+        .cd-timeline-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .cd-timeline-heading strong {
+            color: var(--cd-navy);
+            font-size: 12px;
+        }
+
+        .cd-timeline-heading span {
+            color: var(--cd-muted);
+            font-size: 10px;
+        }
+
+        .cd-timeline-track {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .cd-timeline-step {
+            position: relative;
+            min-width: 0;
+            text-align: center;
+        }
+
+        .cd-timeline-step:not(:last-child)::after {
+            position: absolute;
+            z-index: 0;
+            top: 12px;
+            left: calc(50% + 13px);
+            width: calc(100% - 26px);
+            height: 3px;
+            border-radius: 4px;
+            background: #dbe4ef;
+            content: "";
+        }
+
+        .cd-timeline-step.is-complete:not(:last-child)::after {
+            background: #2563eb;
+        }
+
+        .cd-timeline-dot {
+            position: relative;
+            z-index: 1;
+            display: grid;
+            width: 26px;
+            height: 26px;
+            margin: 0 auto 9px;
+            place-items: center;
+            border: 2px solid #dbe4ef;
+            border-radius: 50%;
+            background: #fff;
+            color: #8292a8;
+            font-size: 11px;
+            font-weight: 800;
+        }
+
+        .cd-timeline-step.is-complete .cd-timeline-dot {
+            border-color: #2563eb;
+            background: #2563eb;
+            color: #fff;
+        }
+
+        .cd-timeline-step.is-current .cd-timeline-dot {
+            outline: 4px solid #dbeafe;
+        }
+
+        .cd-timeline-label {
+            display: block;
+            color: #8292a8;
+            font-size: 10px;
+            font-weight: 650;
+            overflow-wrap: anywhere;
+        }
+
+        .cd-timeline-step.is-complete .cd-timeline-label {
+            color: var(--cd-navy);
+        }
+
+        .cd-timeline-step.is-current .cd-timeline-label {
+            color: var(--cd-blue);
+            font-weight: 850;
+        }
+
+        .cd-no-results {
+            padding: 45px 20px;
+            text-align: center;
+        }
+
+        .cd-empty-icon {
+            display: grid;
+            width: 58px;
+            height: 58px;
+            margin: 0 auto 14px;
+            place-items: center;
+            border-radius: 16px;
+            background: var(--cd-blue-light);
+            color: var(--cd-blue);
+            font-size: 25px;
+        }
+
+        .cd-no-results h3 {
+            margin: 0 0 6px;
+            color: var(--cd-navy);
+            font-size: 16px;
+        }
+
+        .cd-no-results p {
+            max-width: 390px;
+            margin: 0 auto 18px;
+            color: var(--cd-muted);
+            font-size: 12px;
+        }
+
+        .cd-hidden {
+            display: none !important;
+        }
+
+        .cd-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 15px;
+            padding: 23px 0 5px;
+            color: var(--cd-muted);
+            font-size: 11px;
+        }
+
+        .cd-footer a {
+            color: var(--cd-navy);
+            font-weight: 700;
+        }
+
+        /* Responsive layouts */
+
+        @media (min-width: 1450px) {
+            .cd-stats {
+                gap: 20px;
+            }
+
+            .cd-stat-card {
+                padding: 24px;
+            }
+        }
+
+        @media (max-width: 1100px) {
+            :root {
+                --cd-sidebar-width: 225px;
+            }
+
+            .cd-content {
+                padding: 27px 24px;
+            }
+
+            .cd-topbar {
+                padding-right: 24px;
+                padding-left: 24px;
+            }
+
+            .cd-stats {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .cd-stat-card {
+                padding: 18px;
+            }
+        }
+
+        @media (max-width: 760px) {
+            .cd-sidebar {
+                width: min(290px, 85vw);
+                transform: translateX(-105%);
+                box-shadow: none;
+            }
+
+            .cd-sidebar.is-open {
+                transform: translateX(0);
+                box-shadow: 12px 0 40px rgba(0,0,0,.18);
+            }
+
+            .cd-overlay.is-visible {
+                position: fixed;
+                z-index: 90;
+                inset: 0;
+                display: block;
+                background: rgba(8, 23, 42, .52);
+            }
+
+            .cd-main {
+                margin-left: 0;
+            }
+
+            .cd-menu-button {
+                display: inline-grid;
+                flex-shrink: 0;
+                place-items: center;
+            }
+
+            .cd-topbar {
+                min-height: 70px;
+                padding: 12px 18px;
+            }
+
+            .cd-topbar-title {
+                font-size: 15px;
+            }
+
+            .cd-topbar-label {
+                font-size: 10px;
+            }
+
+            .cd-profile-name {
+                max-width: 115px;
+            }
+
+            .cd-content {
+                padding: 23px 18px;
+            }
+
+            .cd-page-heading {
+                align-items: flex-start;
+            }
+
+            .cd-page-heading h1 {
+                font-size: 26px;
+            }
+
+            .cd-welcome {
+                align-items: flex-start;
+                flex-direction: column;
+                padding: 25px 23px;
+            }
+
+            .cd-welcome-action {
+                width: 100%;
+            }
+
+            .cd-welcome-action .cd-button {
+                width: 100%;
+            }
+
+            .cd-requests-header {
+                padding: 18px;
+            }
+
+            .cd-controls {
+                align-items: stretch;
+                flex-direction: column;
+                padding: 16px 18px;
+            }
+
+            .cd-filter {
+                width: 100%;
+            }
+
+            .cd-results-count {
+                padding-right: 18px;
+                padding-left: 18px;
+            }
+
+            .cd-request-card {
+                padding: 19px 17px;
+            }
+
+            .cd-timeline {
+                padding: 15px 10px 13px;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .cd-topbar {
+                gap: 9px;
+                padding-right: 12px;
+                padding-left: 12px;
+            }
+
+            .cd-topbar-left {
+                gap: 9px;
+            }
+
+            .cd-menu-button {
+                width: 38px;
+                height: 38px;
+            }
+
+            .cd-profile {
+                gap: 7px;
+            }
+
+            .cd-avatar {
+                flex-basis: 35px;
+                width: 35px;
+                height: 35px;
+                font-size: 12px;
+            }
+
+            .cd-profile-name {
+                max-width: 95px;
+                font-size: 11px;
+            }
+
+            .cd-profile-role {
+                font-size: 10px;
+            }
+
+            .cd-content {
+                padding: 20px 12px;
+            }
+
+            .cd-page-heading {
+                flex-direction: column;
+                gap: 15px;
+            }
+
+            .cd-page-heading > .cd-button {
+                width: 100%;
+            }
+
+            .cd-page-heading h1 {
+                font-size: 24px;
+            }
+
+            .cd-stats {
+                gap: 10px;
+            }
+
+            .cd-stat-card {
+                padding: 14px 12px;
+            }
+
+            .cd-stat-top {
+                align-items: flex-start;
+                flex-direction: column-reverse;
+                gap: 10px;
+                margin-bottom: 11px;
+            }
+
+            .cd-stat-icon {
+                width: 33px;
+                height: 33px;
+                flex-basis: 33px;
+                font-size: 16px;
+            }
+
+            .cd-stat-label {
+                font-size: 11px;
+            }
+
+            .cd-stat-number {
+                font-size: 26px;
+            }
+
+            .cd-stat-description {
+                font-size: 10px;
+            }
+
+            .cd-requests-header {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 12px;
+            }
+
+            .cd-requests-header .cd-button {
+                width: 100%;
+            }
+
+            .cd-request-top {
+                flex-direction: column;
+                gap: 12px;
+            }
+
+            .cd-request-title {
+                font-size: 15px;
+            }
+
+            .cd-request-meta {
+                flex-direction: column;
+                gap: 7px;
+            }
+
+            .cd-timeline-label {
+                font-size: 9px;
+            }
+
+            .cd-timeline-heading {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 3px;
+            }
+
+            .cd-footer {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 8px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *,
+            *::before,
+            *::after {
+                scroll-behavior: auto !important;
+                transition-duration: .01ms !important;
+                animation-duration: .01ms !important;
+            }
+        }
+    </style>
+</head>
+
+<body>
+<div class="cd-layout">
+
+    <aside class="cd-sidebar" id="cdSidebar" aria-label="Citizen navigation">
+        <a href="index.php" class="cd-brand">
+            <span class="cd-brand-mark" aria-hidden="true">C</span>
+            <span>
+                CivicDesk
+                <small>CITIZEN SERVICES</small>
+            </span>
+        </a>
+
+        <p class="cd-nav-heading">Workspace</p>
+
+        <nav class="cd-nav">
+            <a href="dashboard.php" class="cd-nav-link active"
+               aria-current="page">
+                <span class="cd-nav-icon" aria-hidden="true">▦</span>
+                Dashboard
+            </a>
+
+            <a href="#my-requests" class="cd-nav-link">
+                <span class="cd-nav-icon" aria-hidden="true">▤</span>
+                My service requests
+            </a>
+
+            <a href="submit_request.php" class="cd-nav-link">
+                <span class="cd-nav-icon" aria-hidden="true">＋</span>
+                Submit a request
+            </a>
+        </nav>
+
+        <p class="cd-nav-heading">Account</p>
+
+        <nav class="cd-nav">
+            <a href="index.php" class="cd-nav-link">
+                <span class="cd-nav-icon" aria-hidden="true">⌂</span>
+                Public homepage
+            </a>
+
+            <a href="logout.php" class="cd-nav-link">
+                <span class="cd-nav-icon" aria-hidden="true">↪</span>
+                Sign out
+            </a>
+        </nav>
+
+        <div class="cd-sidebar-bottom">
+            <div class="cd-help-card">
+                <strong>Need a service?</strong>
+                <p>Submit your concern and follow its progress from your dashboard.</p>
+            </div>
+
+            <div class="cd-sidebar-footer">
+                <div>Secure Citizen Portal</div>
+                <a href="submit_request.php">+ Create a service request</a>
+                <p>&copy; <?= date('Y') ?> CivicDesk</p>
+            </div>
+        </div>
+    </aside>
+
+    <div class="cd-overlay" id="cdOverlay" aria-hidden="true"></div>
+
+    <main class="cd-main">
+        <header class="cd-topbar">
+            <div class="cd-topbar-left">
+                <button
+                    type="button"
+                    class="cd-menu-button"
+                    id="cdMenuButton"
+                    aria-label="Open navigation menu"
+                    aria-controls="cdSidebar"
+                    aria-expanded="false"
+                >☰</button>
+
+                <div>
+                    <p class="cd-topbar-label">Citizen portal</p>
+                    <p class="cd-topbar-title">My Dashboard</p>
+                </div>
+            </div>
+
+            <div class="cd-profile">
+                <div class="cd-avatar" aria-hidden="true">
+                    <?= escape($initials) ?>
+                </div>
+
+                <div>
+                    <span class="cd-profile-name">
+                        <?= escape($fullName) ?>
+                    </span>
+                    <span class="cd-profile-role">Citizen account</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="cd-content">
+
+            <section class="cd-page-heading">
+                <div>
+                    <p class="cd-eyebrow">Your service centre</p>
+                    <h1>Citizen Dashboard</h1>
+                    <p>Manage your requests and stay informed about their progress.</p>
+                </div>
+
+                <a class="cd-button" href="submit_request.php">
+                    <span aria-hidden="true">＋</span>
+                    Submit a request
+                </a>
+            </section>
+
+            <section class="cd-welcome" aria-labelledby="welcome-title">
+                <div class="cd-welcome-content">
+                    <div class="cd-welcome-tag">
+                        <span aria-hidden="true">✦</span>
+                        Welcome to CivicDesk
+                    </div>
+
+                    <h2 id="welcome-title">
+                        Hello, <?= escape($fullName) ?>!
+                    </h2>
+
+                    <p>
+                        Your concerns matter. Submit service requests and track
+                        their progress conveniently from one place.
+                    </p>
+                </div>
+
+                <div class="cd-welcome-action">
+                    <a class="cd-button" href="submit_request.php">
+                        Create a service request
+                        <span aria-hidden="true">→</span>
+                    </a>
+                </div>
+            </section>
+
+            <section aria-labelledby="overview-heading">
+                <div class="cd-section-heading">
+                    <h2 id="overview-heading">Request overview</h2>
+                  <span class="cd-section-note">Your 20 most recent requests</span>
+                </div>
+
+                <div class="cd-stats">
+                    <article class="cd-stat-card">
+                        <div class="cd-stat-top">
+                            <span class="cd-stat-label">Total requests</span>
+                            <span class="cd-stat-icon cd-icon-blue"
+                                  aria-hidden="true">▤</span>
+                        </div>
+                        <div class="cd-stat-number">
+                            <?= $totalRequests ?>
+                        </div>
+                        <p class="cd-stat-description">Requests submitted</p>
+                    </article>
+
+                    <article class="cd-stat-card">
+                        <div class="cd-stat-top">
+                            <span class="cd-stat-label">Pending</span>
+                            <span class="cd-stat-icon cd-icon-orange"
+                                  aria-hidden="true">◷</span>
+                        </div>
+                        <div class="cd-stat-number">
+                            <?= $pendingRequests ?>
+                        </div>
+                        <p class="cd-stat-description">Awaiting action</p>
+                    </article>
+
+                    <article class="cd-stat-card">
+                        <div class="cd-stat-top">
+                            <span class="cd-stat-label">In progress</span>
+                            <span class="cd-stat-icon cd-icon-purple"
+                                  aria-hidden="true">↻</span>
+                        </div>
+                        <div class="cd-stat-number">
+                            <?= $progressRequests ?>
+                        </div>
+                        <p class="cd-stat-description">Being worked on</p>
+                    </article>
+
+                    <article class="cd-stat-card">
+                        <div class="cd-stat-top">
+                            <span class="cd-stat-label">Resolved</span>
+                            <span class="cd-stat-icon cd-icon-green"
+                                  aria-hidden="true">✓</span>
+                        </div>
+                        <div class="cd-stat-number">
+                            <?= $resolvedRequests ?>
+                        </div>
+                        <p class="cd-stat-description">Successfully resolved</p>
+                    </article>
+                </div>
+            </section>
+
+            <section id="my-requests" aria-labelledby="requests-heading">
+                <div class="cd-requests-panel">
+
+                    <div class="cd-requests-header">
+                        <div>
+                            <h2 id="requests-heading">My service requests</h2>
+                            <p>Search, filter and track the status of your requests.</p>
+                        </div>
+
+                        <a class="cd-button cd-button-secondary"
+                           href="submit_request.php">
+                            <span aria-hidden="true">＋</span>
+                            New request
+                        </a>
+                    </div>
+
+                    <div class="cd-controls">
+                        <div class="cd-search-wrap">
+                            <span class="cd-search-icon" aria-hidden="true">⌕</span>
+                            <input
+                                type="search"
+                                class="cd-search"
+                                id="cdSearch"
+                                placeholder="Search reference, category or location..."
+                                aria-label="Search service requests"
+                                autocomplete="off"
+                            >
+                        </div>
+
+                        <div>
+                            <label for="cdStatusFilter"
+                                   style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">
+                                Filter by status
+                            </label>
+                            <select class="cd-filter" id="cdStatusFilter">
+                                <option value="all">All statuses</option>
+                                <option value="pending">Pending</option>
+                                <option value="in progress">In progress</option>
+                                <option value="resolved">Resolved</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="cd-results-count" id="cdResultsCount"
+                         aria-live="polite">
+                        Showing <?= count($requests) ?> of up to 20 recent requests
+                    </div>
+
+                    <?php if (count($requests) === 0): ?>
+
+                        <div class="cd-no-results">
+                            <div class="cd-empty-icon" aria-hidden="true">▤</div>
+                            <h3>No service requests yet</h3>
+                            <p>
+                                When you submit a request, its reference number,
+                                status and progress will appear here.
+                            </p>
+                            <a class="cd-button" href="submit_request.php">
+                                Submit your first request
+                            </a>
+                        </div>
+
+                    <?php else: ?>
+
+                        <div class="cd-request-list" id="cdRequestList">
+
+                            <?php foreach ($requests as $request): ?>
+                                <?php
+                                $status = trim((string) $request['status']);
+                                $statusKey = strtolower($status);
+                                $class = statusClass($status);
+
+                                // Timeline stages are presentation-only.
+                                // They do not create or modify audit records.
+                                $stage = match ($statusKey) {
+                                    'pending' => 0,
+                                    'in progress' => 1,
+                                    'resolved' => 2,
+                                    default => -1,
+                                };
+
+                                $searchText = implode(' ', [
+                                    (string) $request['reference_number'],
+                                    (string) $request['category'],
+                                    (string) $request['location'],
+                                    $status,
+                                ]);
+                                ?>
+
+                                <article
+                                    class="cd-request-card"
+                                    data-status="<?= escape($statusKey) ?>"
+                                    data-search="<?= escape($searchText) ?>"
+                                >
+                                    <div class="cd-request-top">
+                                        <div>
+                                            <p class="cd-request-reference">
+                                                REF: <?= escape((string) $request['reference_number']) ?>
+                                            </p>
+
+                                            <h3 class="cd-request-title">
+                                                <?= escape((string) $request['category']) ?>
+                                            </h3>
+
+                                            <p class="cd-request-location">
+                                                <span aria-hidden="true">⌖</span>
+                                                <?= escape((string) $request['location']) ?>
+                                            </p>
+                                        </div>
+
+                                        <span class="cd-status cd-status-<?= escape($class) ?>">
+                                            <?= escape($status) ?>
+                                        </span>
+                                    </div>
+
+                                    <div class="cd-request-meta">
+                                        <span>
+                                            Submitted:
+                                            <strong>
+                                                <?= escape(formatDate((string) $request['created_at'])) ?>
+                                            </strong>
+                                        </span>
+
+                                        <span>
+                                            Last updated:
+                                            <strong>
+                                                <?= escape(formatDate(
+                                                    isset($request['updated_at'])
+                                                        ? (string) $request['updated_at']
+                                                        : null
+                                                )) ?>
+                                            </strong>
+                                        </span>
+                                    </div>
+
+                                    <div class="cd-timeline">
+                                        <div class="cd-timeline-heading">
+                                            <strong>Request progress</strong>
+                                            <span>
+                                                <?php if ($statusKey === 'pending'): ?>
+                                                    Awaiting action
+                                                <?php elseif ($statusKey === 'in progress'): ?>
+                                                    Work in progress
+                                                <?php elseif ($statusKey === 'resolved'): ?>
+                                                    Request resolved
+                                                <?php else: ?>
+                                                    Current status: <?= escape($status) ?>
+                                                <?php endif; ?>
+                                            </span>
+                                        </div>
+
+                                        <div class="cd-timeline-track"
+                                             aria-label="Request progress: <?= escape($status) ?>">
+
+                                            <div class="cd-timeline-step
+                                                <?= $stage >= 0 ? 'is-complete' : '' ?>
+                                                <?= $stage === 0 ? 'is-current' : '' ?>">
+                                                <span class="cd-timeline-dot"
+                                                      aria-hidden="true">
+                                                    <?= $stage >= 0 ? '✓' : '1' ?>
+                                                </span>
+                                                <span class="cd-timeline-label">
+                                                    Submitted
+                                                </span>
+                                            </div>
+
+                                            <div class="cd-timeline-step
+                                                <?= $stage >= 1 ? 'is-complete' : '' ?>
+                                                <?= $stage === 1 ? 'is-current' : '' ?>">
+                                                <span class="cd-timeline-dot"
+                                                      aria-hidden="true">
+                                                    <?= $stage >= 1 ? '✓' : '2' ?>
+                                                </span>
+                                                <span class="cd-timeline-label">
+                                                    In progress
+                                                </span>
+                                            </div>
+
+                                            <div class="cd-timeline-step
+                                                <?= $stage >= 2 ? 'is-complete' : '' ?>
+                                                <?= $stage === 2 ? 'is-current' : '' ?>">
+                                                <span class="cd-timeline-dot"
+                                                      aria-hidden="true">
+                                                    <?= $stage >= 2 ? '✓' : '3' ?>
+                                                </span>
+                                                <span class="cd-timeline-label">
+                                                    Resolved
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </article>
+                            <?php endforeach; ?>
+
+                        </div>
+
+                        <div class="cd-no-results cd-hidden" id="cdNoMatches">
+                            <div class="cd-empty-icon" aria-hidden="true">⌕</div>
+                            <h3>No matching requests</h3>
+                            <p>
+                                Try a different search term or change the
+                                selected status filter.
+                            </p>
+                            <button type="button"
+                                    class="cd-button cd-button-secondary"
+                                    id="cdClearFilters">
+                                Clear search and filters
+                            </button>
+                        </div>
+
+                    <?php endif; ?>
+                </div>
+            </section>
+
+            <footer class="cd-footer">
+                <span>&copy; <?= date('Y') ?> CivicDesk. Citizen services portal.</span>
+                <a href="logout.php">Sign out securely ↗</a>
+            </footer>
+
+        </div>
+    </main>
+</div>
+
+<script>
+(function () {
+    'use strict';
+
+    // Mobile sidebar.
+    const sidebar = document.getElementById('cdSidebar');
+    const overlay = document.getElementById('cdOverlay');
+    const menuButton = document.getElementById('cdMenuButton');
+
+    function setMenu(open) {
+        sidebar.classList.toggle('is-open', open);
+        overlay.classList.toggle('is-visible', open);
+        document.body.classList.toggle('menu-open', open);
+        menuButton.setAttribute('aria-expanded', String(open));
+        menuButton.setAttribute(
+            'aria-label',
+            open ? 'Close navigation menu' : 'Open navigation menu'
+        );
+        menuButton.textContent = open ? '×' : '☰';
+    }
+
+    menuButton.addEventListener('click', function () {
+        setMenu(!sidebar.classList.contains('is-open'));
+    });
+
+    overlay.addEventListener('click', function () {
+        setMenu(false);
+    });
+
+    sidebar.querySelectorAll('a').forEach(function (link) {
+        link.addEventListener('click', function () {
+            setMenu(false);
+        });
+    });
+
+    document.addEventListener('keydown', function (event) {
+        if (event.key === 'Escape') {
+            setMenu(false);
+        }
+    });
+
+    window.addEventListener('resize', function () {
+        if (window.innerWidth > 760) {
+            setMenu(false);
+        }
+    });
+
+    // Client-side search and status filtering.
+    // This filters only the requests already retrieved by PHP.
+    const searchInput = document.getElementById('cdSearch');
+    const statusFilter = document.getElementById('cdStatusFilter');
+    const requestList = document.getElementById('cdRequestList');
+    const resultsCount = document.getElementById('cdResultsCount');
+    const noMatches = document.getElementById('cdNoMatches');
+    const clearButton = document.getElementById('cdClearFilters');
+
+    if (!searchInput || !statusFilter || !requestList) {
+        return;
+    }
+
+    const cards = Array.from(
+        requestList.querySelectorAll('.cd-request-card')
+    );
+
+    function filterRequests() {
+        const term = searchInput.value.trim().toLocaleLowerCase();
+        const selectedStatus = statusFilter.value;
+        let visible = 0;
+
+        cards.forEach(function (card) {
+            const searchable = (
+                card.dataset.search || ''
+            ).toLocaleLowerCase();
+
+            const cardStatus = (
+                card.dataset.status || ''
+            ).toLocaleLowerCase();
+
+            const matchesSearch = searchable.includes(term);
+            const matchesStatus = (
+                selectedStatus === 'all' ||
+                cardStatus === selectedStatus
+            );
+
+            const show = matchesSearch && matchesStatus;
+
+            card.classList.toggle('cd-hidden', !show);
+
+            if (show) {
+                visible++;
+            }
+        });
+
+        resultsCount.textContent =
+            'Showing ' + visible + ' of ' + cards.length +
+            ' requests currently loaded';
+
+        noMatches.classList.toggle('cd-hidden', visible !== 0);
+    }
+
+    searchInput.addEventListener('input', filterRequests);
+    statusFilter.addEventListener('change', filterRequests);
+
+    if (clearButton) {
+        clearButton.addEventListener('click', function () {
+            searchInput.value = '';
+            statusFilter.value = 'all';
+            filterRequests();
+            searchInput.focus();
+        });
+    }
+})();
+</script>
+</body>
+</html>

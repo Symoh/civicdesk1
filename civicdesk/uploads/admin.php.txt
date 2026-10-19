@@ -1,0 +1,407 @@
+
+<?php
+declare(strict_types=1);
+
+$isHttps = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+
+session_set_cookie_params([
+    'lifetime' => 0,
+    'path' => '/',
+    'secure' => $isHttps,
+    'httponly' => true,
+    'samesite' => 'Lax',
+]);
+
+session_start();
+
+header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+header('Pragma: no-cache');
+
+require_once __DIR__ . '/config.php';
+
+function escape(string $value): string
+{
+    return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+}
+
+if (!isset($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
+if (
+    !isset($_SESSION['user_id'], $_SESSION['role']) ||
+    $_SESSION['role'] !== 'admin'
+) {
+    header('Location: login.php');
+    exit;
+}
+
+$adminId = (int) $_SESSION['user_id'];
+$allowedStatuses = ['Pending', 'In Progress', 'Resolved'];
+$error = '';
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $token = (string) ($_POST['csrf_token'] ?? '');
+    $requestId = filter_var(
+        $_POST['request_id'] ?? null,
+        FILTER_VALIDATE_INT
+    );
+    $newStatus = (string) ($_POST['new_status'] ?? '');
+    $notes = trim((string) ($_POST['admin_notes'] ?? ''));
+
+    if (!hash_equals($_SESSION['csrf_token'], $token)) {
+        $error = 'Your form session expired. Refresh and try again.';
+    } elseif ($requestId === false || $requestId < 1) {
+        $error = 'Invalid service request.';
+    } elseif (!in_array($newStatus, $allowedStatuses, true)) {
+        $error = 'Please select a valid status.';
+    } elseif (mb_strlen($notes) > 5000) {
+        $error = 'Administrator notes must not exceed 5,000 characters.';
+    } else {
+        try {
+            $pdo->beginTransaction();
+
+            // Lock the request to avoid conflicting simultaneous updates.
+            $findStmt = $pdo->prepare(
+                'SELECT status FROM service_requests
+                 WHERE id = :id FOR UPDATE'
+            );
+            $findStmt->execute(['id' => $requestId]);
+            $request = $findStmt->fetch();
+
+            if (!$request) {
+                throw new RuntimeException('Service request not found.');
+            }
+
+            $oldStatus = (string) $request['status'];
+
+            $updateStmt = $pdo->prepare(
+                'UPDATE service_requests
+                 SET status = :status,
+                     admin_notes = :notes,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = :id'
+            );
+
+            $updateStmt->execute([
+                'status' => $newStatus,
+                'notes' => $notes !== '' ? $notes : null,
+                'id' => $requestId,
+            ]);
+
+            // Record a history entry only when the status actually changes.
+            if ($oldStatus !== $newStatus) {
+                $historyStmt = $pdo->prepare(
+                    'INSERT INTO request_status_history
+                        (request_id, changed_by, old_status, new_status, notes)
+                     VALUES
+                        (:request_id, :changed_by, :old_status, :new_status, :notes)'
+                );
+
+                $historyStmt->execute([
+                    'request_id' => $requestId,
+                    'changed_by' => $adminId,
+                    'old_status' => $oldStatus,
+                    'new_status' => $newStatus,
+                    'notes' => $notes !== '' ? $notes : null,
+                ]);
+            }
+
+            $pdo->commit();
+
+            $_SESSION['admin_notice'] = $oldStatus === $newStatus
+                ? 'Request notes saved. The status was unchanged.'
+                : 'Request status updated and history recorded.';
+
+            $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+
+            header('Location: admin.php');
+            exit;
+
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+
+            error_log('CivicDesk admin update failed: ' . $e->getMessage());
+            $error = $e instanceof RuntimeException
+                && $e->getMessage() === 'Service request not found.'
+                ? 'That service request could not be found.'
+                : 'The update failed. Check the server logs and try again.';
+        }
+    }
+}
+
+$notice = $_SESSION['admin_notice'] ?? null;
+unset($_SESSION['admin_notice']);
+
+try {
+    $statsStmt = $pdo->query(
+        "SELECT COUNT(*) AS total,
+                COALESCE(SUM(status = 'Pending'), 0) AS pending,
+                COALESCE(SUM(status = 'In Progress'), 0) AS in_progress,
+                COALESCE(SUM(status = 'Resolved'), 0) AS resolved
+         FROM service_requests"
+    );
+    $stats = $statsStmt->fetch();
+
+    $requestsStmt = $pdo->query(
+        'SELECT sr.id, sr.reference_number, sr.category, sr.location,
+                sr.description, sr.image_path, sr.status, sr.admin_notes,
+                sr.created_at, u.full_name, u.email
+         FROM service_requests sr
+         INNER JOIN users u ON u.id = sr.citizen_id
+         ORDER BY
+            CASE sr.status
+                WHEN "Pending" THEN 1
+                WHEN "In Progress" THEN 2
+                ELSE 3
+            END,
+            sr.created_at DESC
+         LIMIT 100'
+    );
+    $requests = $requestsStmt->fetchAll();
+
+} catch (PDOException $e) {
+    error_log('CivicDesk admin dashboard failed: ' . $e->getMessage());
+    http_response_code(500);
+    exit('Unable to load the administration dashboard.');
+}
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Administration | CivicDesk</title>
+    <link rel="stylesheet" href="assets/style.css">
+    <style>
+        .admin-banner {
+            padding: 24px;
+            background: #eef5ff;
+            border-radius: 14px;
+            margin-bottom: 24px;
+        }
+        .admin-stats {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+            margin: 22px 0 30px;
+        }
+        .admin-stat {
+            padding: 18px;
+            background: #fff;
+            border: 1px solid #dce4ee;
+            border-radius: 12px;
+        }
+        .admin-stat strong {
+            display: block;
+            font-size: 1.7rem;
+            margin-top: 6px;
+        }
+        .admin-table-wrap {
+            overflow-x: auto;
+        }
+        .admin-table {
+            width: 100%;
+            min-width: 1050px;
+            border-collapse: collapse;
+            background: #fff;
+        }
+        .admin-table th,
+        .admin-table td {
+            padding: 14px;
+            text-align: left;
+            vertical-align: top;
+            border-bottom: 1px solid #e1e7ef;
+        }
+        .admin-table th {
+            background: #f6f8fb;
+        }
+        .admin-actions {
+            min-width: 230px;
+        }
+        .admin-actions select,
+        .admin-actions textarea {
+            display: block;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 9px;
+            margin-bottom: 9px;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            font: inherit;
+        }
+        .admin-actions textarea {
+            min-height: 70px;
+        }
+        .admin-message {
+            padding: 14px;
+            border-radius: 8px;
+            margin: 16px 0;
+            background: #eaf8ef;
+            color: #17663a;
+        }
+        .admin-error {
+            background: #fff0f0;
+            color: #9b1c1c;
+        }
+        .evidence-link {
+            display: inline-block;
+            margin-top: 8px;
+        }
+        @media (max-width: 760px) {
+            .admin-stats {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+    </style>
+</head>
+<body>
+<header class="site-header">
+    <div class="container navbar">
+        <a class="brand" href="index.php">
+            <span class="brand-mark" aria-hidden="true">C</span>
+            <span>CivicDesk</span>
+        </a>
+        <nav class="nav-links" aria-label="Administration navigation">
+            <a href="index.php">Home</a>
+            <a href="logout.php">Sign out</a>
+        </nav>
+    </div>
+</header>
+
+<main class="section">
+    <div class="container">
+        <section class="admin-banner">
+            <p class="eyebrow">ADMINISTRATION</p>
+            <h1>Service request management</h1>
+            <p>Review citizen reports and record progress on each request.</p>
+        </section>
+
+        <?php if (is_string($notice) && $notice !== ''): ?>
+            <div class="admin-message" role="status">
+                <?= escape($notice) ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($error !== ''): ?>
+            <div class="admin-message admin-error" role="alert">
+                <?= escape($error) ?>
+            </div>
+        <?php endif; ?>
+
+        <section aria-label="Request statistics">
+            <div class="admin-stats">
+                <div class="admin-stat">All requests
+                    <strong><?= (int) $stats['total'] ?></strong>
+                </div>
+                <div class="admin-stat">Pending
+                    <strong><?= (int) $stats['pending'] ?></strong>
+                </div>
+                <div class="admin-stat">In progress
+                    <strong><?= (int) $stats['in_progress'] ?></strong>
+                </div>
+                <div class="admin-stat">Resolved
+                    <strong><?= (int) $stats['resolved'] ?></strong>
+                </div>
+            </div>
+        </section>
+
+        <h2>Incoming service requests</h2>
+        <p>Showing up to 100 most recent requests, with pending items first.</p>
+
+        <?php if ($requests === []): ?>
+            <p>No service requests have been submitted yet.</p>
+        <?php else: ?>
+            <div class="admin-table-wrap">
+                <table class="admin-table">
+                    <thead>
+                    <tr>
+                        <th>Reference / date</th>
+                        <th>Citizen</th>
+                        <th>Issue</th>
+                        <th>Current status</th>
+                        <th>Update request</th>
+                    </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach ($requests as $request): ?>
+                        <tr>
+                            <td>
+                                <strong><?= escape((string) $request['reference_number']) ?></strong>
+                                <br>
+                                <?= escape(date(
+                                    'd M Y',
+                                    strtotime((string) $request['created_at'])
+                                )) ?>
+                            </td>
+                            <td>
+                                <?= escape((string) $request['full_name']) ?>
+                                <br>
+                                <?= escape((string) $request['email']) ?>
+                            </td>
+                            <td>
+                                <strong><?= escape((string) $request['category']) ?></strong>
+                                <br>
+                                Location: <?= escape((string) $request['location']) ?>
+                                <p><?= nl2br(escape((string) $request['description'])) ?></p>
+
+                                <?php if (!empty($request['image_path'])): ?>
+                                    <a class="evidence-link"
+                                       href="<?= escape((string) $request['image_path']) ?>"
+                                       target="_blank" rel="noopener noreferrer">
+                                        Open attached evidence
+                                    </a>
+                                <?php endif; ?>
+                            </td>
+                            <td><?= escape((string) $request['status']) ?></td>
+                            <td class="admin-actions">
+                                <form method="POST" action="admin.php">
+                                    <input type="hidden" name="csrf_token"
+                                           value="<?= escape($_SESSION['csrf_token']) ?>">
+                                    <input type="hidden" name="request_id"
+                                           value="<?= (int) $request['id'] ?>">
+
+                                    <label>
+                                        New status
+                                        <select name="new_status" required>
+                                            <?php foreach ($allowedStatuses as $status): ?>
+                                                <option value="<?= escape($status) ?>"
+                                                    <?= $request['status'] === $status
+                                                        ? 'selected' : '' ?>>
+                                                    <?= escape($status) ?>
+                                                </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                    </label>
+
+                                    <label>
+                                        Administrator notes
+                                        <textarea name="admin_notes"
+                                                  maxlength="5000"
+                                                  placeholder="Action taken or next steps"><?= escape((string) ($request['admin_notes'] ?? '')) ?></textarea>
+                                    </label>
+
+                                    <button class="btn" type="submit">
+                                        Save update
+                                    </button>
+                                </form>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </div>
+        <?php endif; ?>
+    </div>
+</main>
+
+<footer class="site-footer">
+    <div class="container footer-inner">
+        <span>&copy; <?= date('Y') ?> CivicDesk</span>
+        <a href="logout.php">Sign out</a>
+    </div>
+</footer>
+</body>
+</html>
